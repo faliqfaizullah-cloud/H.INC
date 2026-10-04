@@ -4,6 +4,10 @@ import android.Manifest
 import android.content.Context
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -58,6 +62,13 @@ val GlassBorder = Brush.linearGradient(listOf(Color.White.copy(.55f), Color.Whit
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        if (Build.VERSION.SDK_INT >= 28)
+            window.attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
         setContent { HincApp(applicationContext) }
     }
 }
@@ -79,7 +90,7 @@ fun HincApp(ctx: Context) {
     MaterialTheme(colorScheme = darkColorScheme()) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             Aurora()
-            Box(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 16.dp)) {
+            Box(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
                 when (screen) {
                     Screen.Dashboard -> DashboardScreen(readings, vitD, tick,
                         onSetup = { screen = Screen.Reminder }, onScan = { screen = Screen.Scan },
@@ -91,7 +102,7 @@ fun HincApp(ctx: Context) {
             }
             dialog?.let { kind ->
                 AddDialog(kind, onDismiss = { dialog = null }, onSave = { v ->
-                    if (kind == "glucose") readings = store.add(v) else { store.vitD = v; vitD = v }
+                    if (kind == "glucose") { readings = store.add(v); HincWidget.refresh(ctx) } else { store.vitD = v; vitD = v }
                     thud(); dialog = null; screen = Screen.Dashboard
                 })
             }
