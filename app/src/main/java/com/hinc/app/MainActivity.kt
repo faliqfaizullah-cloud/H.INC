@@ -97,7 +97,7 @@ class Ui(val c: Context) {
         s.name = name; s.dos = dos; s.cid = cid; s.plan = plan; s.pay = pay; s.stage = stage
         HincWidget.refresh(c)
     }
-    fun setStage(i: Int) { stage = i; save() }
+    fun chooseStage(i: Int) { stage = i; save() }
     fun addMsg(t: String) { msgs = msgs + Msg(t, System.currentTimeMillis()); s.saveMsgs(msgs) }
     fun importDoc(ctx: Context, u: Uri, cat: String): Doc? {
         try { ctx.contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (e: Exception) {}
@@ -264,7 +264,7 @@ fun ClaimScreen(ui: Ui, tick: () -> Unit, onBack: () -> Unit, onChat: () -> Unit
                 }
                 Row(Modifier.padding(top = 6.dp)) {
                     STAGES.forEachIndexed { i, l ->
-                        Box(Modifier.weight(1f).clickable { tick(); ui.setStage(i) }, Alignment.Center) { T(l, 11.sp, align = TextAlign.Center) }
+                        Box(Modifier.weight(1f).clickable { tick(); ui.chooseStage(i) }, Alignment.Center) { T(l, 11.sp, align = TextAlign.Center) }
                     }
                 }
             }
