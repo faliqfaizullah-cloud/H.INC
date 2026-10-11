@@ -1,22 +1,23 @@
 package com.hinc.app
 
-import android.Manifest
+import android.app.DatePickerDialog
 import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.pdf.PdfRenderer
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.view.WindowManager
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -28,16 +29,15 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.BlurredEdgeTreatment
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -49,15 +49,23 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Date
 import java.util.Locale
-import kotlin.math.*
 
-val Yellow = Color(0xFFD9F23A)
-val Pink = Color(0xFFE0238C)
-val Mauve = Color(0xFFC79EC0)
-val GlassBorder = Brush.linearGradient(listOf(Color.White.copy(.55f), Color.White.copy(.06f)))
+val Blue = Color(0xFF1F6BFF)
+val Lime = Color(0xFFC9F31D)
+val Soft = Color(0xFFE9E9E9)
+val Dark = Color(0xFF1C1C1E)
+val STAGES = listOf("Claim\nInitiated", "Survey\nCompleted", "Documents\nUploaded", "Claim\nSettled")
+val STATUS = listOf("Your claim has been initiated", "Your survey is completed", "Your documents are uploaded", "Your claim has been settled")
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -69,390 +77,401 @@ class MainActivity : ComponentActivity() {
             hide(WindowInsetsCompat.Type.systemBars())
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
-        setContent { HincApp(applicationContext) }
+        setContent { HincApp(applicationContext) { moveTaskToBack(true) } }
     }
 }
 
-enum class Screen { Dashboard, Reminder, Scan }
+// ---------- state ----------
+class Ui(val c: Context) {
+    private val s = Store(c)
+    var name by mutableStateOf(s.name)
+    var dos by mutableStateOf(s.dos)
+    var cid by mutableStateOf(s.cid)
+    var plan by mutableStateOf(s.plan)
+    var pay by mutableStateOf(s.pay)
+    var stage by mutableStateOf(s.stage)
+    var docs by mutableStateOf(s.docs())
+    var msgs by mutableStateOf(s.msgs())
 
+    fun save() {
+        s.name = name; s.dos = dos; s.cid = cid; s.plan = plan; s.pay = pay; s.stage = stage
+        HincWidget.refresh(c)
+    }
+    fun setStage(i: Int) { stage = i; save() }
+    fun addMsg(t: String) { msgs = msgs + Msg(t, System.currentTimeMillis()); s.saveMsgs(msgs) }
+    fun importDoc(ctx: Context, u: Uri, cat: String): Doc? {
+        try { ctx.contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (e: Exception) {}
+        val n = try {
+            ctx.contentResolver.query(u, null, null, null, null)?.use { cur ->
+                val i = cur.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (cur.moveToFirst() && i >= 0) cur.getString(i) else null
+            }
+        } catch (e: Exception) { null } ?: "Document"
+        val d = Doc(u.toString(), n, cat, System.currentTimeMillis(), ctx.contentResolver.getType(u) ?: "*/*")
+        docs = listOf(d) + docs; s.saveDocs(docs)
+        if (stage < 2) stage = 2
+        save()
+        addMsg("Attached ${cat.lowercase()}: $n")
+        return d
+    }
+}
+
+fun openDoc(c: Context, d: Doc) {
+    try {
+        c.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(Uri.parse(d.uri), d.mime)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK))
+    } catch (e: Exception) {}
+}
+
+fun thumb(c: Context, d: Doc): ImageBitmap? = try {
+    val uri = Uri.parse(d.uri)
+    if (d.mime.startsWith("image")) {
+        val o = BitmapFactory.Options().apply { inSampleSize = 4 }
+        c.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o) }?.asImageBitmap()
+    } else if (d.mime == "application/pdf") {
+        c.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+            val r = PdfRenderer(pfd)
+            val p = r.openPage(0)
+            val w = 360; val h = (w.toFloat() * p.height / p.width).toInt()
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            bmp.eraseColor(android.graphics.Color.WHITE)
+            p.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+            p.close(); r.close()
+            bmp.asImageBitmap()
+        }
+    } else null
+} catch (e: Exception) { null }
+
+// ---------- root ----------
 @Composable
-fun HincApp(ctx: Context) {
-    val store = remember { Store(ctx) }
-    var screen by remember { mutableStateOf(Screen.Dashboard) }
-    var readings by remember { mutableStateOf(store.readings()) }
-    var vitD by remember { mutableStateOf(store.vitD) }
-    var dialog by remember { mutableStateOf<String?>(null) }
+fun HincApp(ctx: Context, onExit: () -> Unit) {
+    val ui = remember { Ui(ctx) }
+    val act = LocalContext.current
+    var screen by remember { mutableStateOf(0) }
+    var edit by remember { mutableStateOf(false) }
+    var sheet by remember { mutableStateOf<List<Doc>>(emptyList()) }
+    var cat by remember { mutableStateOf("Document") }
     val haptic = LocalHapticFeedback.current
     val tick: () -> Unit = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
     val thud: () -> Unit = { haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
-    BackHandler(screen != Screen.Dashboard) { tick(); screen = Screen.Dashboard }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        val added = uris.mapNotNull { ui.importDoc(act, it, cat) }
+        if (added.isNotEmpty()) { sheet = added; thud() }
+    }
+    val attach: (String) -> Unit = { c -> cat = c; picker.launch(arrayOf("*/*")) }
+    BackHandler(screen == 1 || sheet.isNotEmpty()) { if (sheet.isNotEmpty()) sheet = emptyList() else screen = 0 }
 
     MaterialTheme(colorScheme = darkColorScheme()) {
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
-            Aurora()
+        Box(Modifier.fillMaxSize().background(if (screen == 1) Blue else Color.Black)) {
             Box(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                when (screen) {
-                    Screen.Dashboard -> DashboardScreen(readings, vitD, tick,
-                        onSetup = { screen = Screen.Reminder }, onScan = { screen = Screen.Scan },
-                        onAdd = { dialog = "glucose" }, onVitD = { dialog = "vitd" })
-                    Screen.Reminder -> ReminderScreen(ctx, store, tick, thud,
-                        onBack = { screen = Screen.Dashboard }, onStart = { screen = Screen.Scan })
-                    Screen.Scan -> ScanScreen(tick, thud, onBack = { screen = Screen.Dashboard }, onLog = { dialog = "glucose" })
-                }
+                if (screen == 0) ClaimScreen(ui, tick, onBack = onExit, onChat = { screen = 1 },
+                    onEdit = { edit = true }, onAdd = { attach("Document") }, onOpen = { openDoc(act, it) })
+                else ChatScreen(ui, tick, thud, onBack = { screen = 0 }, onAttach = attach)
             }
-            dialog?.let { kind ->
-                AddDialog(kind, onDismiss = { dialog = null }, onSave = { v ->
-                    if (kind == "glucose") { readings = store.add(v); HincWidget.refresh(ctx) } else { store.vitD = v; vitD = v }
-                    thud(); dialog = null; screen = Screen.Dashboard
-                })
-            }
+            if (sheet.isNotEmpty()) UploadedSheet(sheet, onOpen = { openDoc(act, it) }, onClose = { sheet = emptyList() })
+            if (edit) EditDialog(ui, onClose = { edit = false }, thud = thud)
         }
     }
 }
 
+// ---------- helpers ----------
 @Composable
-fun Aurora() {
-    Box(Modifier.fillMaxSize()) {
-        Box(Modifier.offset((-90).dp, 30.dp).size(280.dp).blur(90.dp, BlurredEdgeTreatment.Unbounded).background(Pink.copy(.40f), CircleShape))
-        Box(Modifier.align(Alignment.CenterEnd).offset(90.dp, 0.dp).size(260.dp).blur(90.dp, BlurredEdgeTreatment.Unbounded).background(Color(0xFF3050E0).copy(.35f), CircleShape))
-        Box(Modifier.align(Alignment.BottomStart).offset((-70).dp, 50.dp).size(280.dp).blur(90.dp, BlurredEdgeTreatment.Unbounded).background(Color(0xFF7FA58F).copy(.40f), CircleShape))
-    }
-}
-
-@Composable
-fun T(s: String, size: TextUnit = 16.sp, color: Color = Color.White, weight: FontWeight = FontWeight.Light,
+fun T(s: String, size: TextUnit = 16.sp, color: Color = Color.White, weight: FontWeight = FontWeight.Normal,
       modifier: Modifier = Modifier, align: TextAlign? = null) =
     Text(s, modifier = modifier, color = color, fontSize = size, fontWeight = weight,
         fontFamily = FontFamily.SansSerif, letterSpacing = (-0.3).sp, textAlign = align)
 
-private val GLYPHS = mapOf(
-    '0' to "111101101101111", '1' to "010110010010111", '2' to "111001111100111",
-    '3' to "111001111001111", '4' to "101101111001001", '5' to "111100111001111",
-    '6' to "111100111101111", '7' to "111001001001001", '8' to "111101111101111",
-    '9' to "111101111001111", '-' to "000000111000000"
-)
+@Composable
+fun Circle(label: String, bg: Color, fg: Color = Color.White, sz: Dp = 44.dp, onClick: () -> Unit) {
+    Box(Modifier.size(sz).clip(CircleShape).background(bg).clickable { onClick() }, Alignment.Center) { T(label, 18.sp, fg) }
+}
 
 @Composable
-fun DotText(text: String, dot: Dp = 6.dp, color: Color = Color.White) {
-    val step = dot * 2.4f
-    val w = step * (text.length * 4 - 1)
-    Canvas(Modifier.size(w, step * 5)) {
-        val s = step.toPx(); val r = dot.toPx() / 2
-        text.forEachIndexed { i, ch ->
-            val g = GLYPHS[ch] ?: return@forEachIndexed
-            g.forEachIndexed { k, c ->
-                if (c == '1') drawCircle(color, r, Offset((i * 4 + k % 3) * s + r, (k / 3) * s + r))
+fun Ico(kind: String, color: Color, sz: Dp = 26.dp) {
+    Canvas(Modifier.size(sz)) {
+        val w = size.width
+        val st = Stroke(w * .075f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        when (kind) {
+            "card" -> {
+                drawRoundRect(color, Offset(w * .08f, w * .2f), Size(w * .84f, w * .6f), CornerRadius(w * .1f), style = st)
+                drawLine(color, Offset(w * .08f, w * .4f), Offset(w * .92f, w * .4f), st.width)
+            }
+            "bank" -> {
+                val p = Path().apply { moveTo(w * .5f, w * .12f); lineTo(w * .9f, w * .34f); lineTo(w * .1f, w * .34f); close() }
+                drawPath(p, color, style = st)
+                for (x in listOf(.22f, .5f, .78f)) drawLine(color, Offset(w * x, w * .44f), Offset(w * x, w * .72f), st.width)
+                drawLine(color, Offset(w * .1f, w * .84f), Offset(w * .9f, w * .84f), st.width)
+            }
+            "coin" -> {
+                drawCircle(color, w * .4f, center, style = st)
+                drawLine(color, Offset(w * .5f, w * .26f), Offset(w * .5f, w * .74f), st.width)
+                drawLine(color, Offset(w * .38f, w * .42f), Offset(w * .62f, w * .42f), st.width)
+                drawLine(color, Offset(w * .38f, w * .58f), Offset(w * .62f, w * .58f), st.width)
+            }
+            else -> {
+                drawRoundRect(color, Offset(w * .18f, w * .1f), Size(w * .64f, w * .8f), CornerRadius(w * .1f), style = st)
+                drawLine(color, Offset(w * .32f, w * .36f), Offset(w * .68f, w * .36f), st.width)
+                drawLine(color, Offset(w * .32f, w * .54f), Offset(w * .68f, w * .54f), st.width)
+                drawLine(color, Offset(w * .32f, w * .72f), Offset(w * .5f, w * .72f), st.width)
             }
         }
     }
 }
 
-@Composable
-fun GCard(m: Modifier, tint: Brush, click: (() -> Unit)? = null, content: @Composable BoxScope.() -> Unit) {
-    val shape = RoundedCornerShape(34.dp)
-    Box(m.clip(shape).background(tint).border(1.dp, GlassBorder, shape)
-        .then(if (click != null) Modifier.clickable { click() } else Modifier).padding(20.dp), content = content)
-}
+fun money(v: Int) = if (v < 0) "--" else "\$$v"
+val DAY = SimpleDateFormat("d MMM yyyy", Locale.getDefault())
+val CLOCK = SimpleDateFormat("h:mm a", Locale.getDefault())
 
 @Composable
-fun GCircle(label: String, size: Dp = 44.dp, onClick: () -> Unit) {
-    Box(Modifier.size(size).clip(CircleShape).background(Color.White.copy(.12f)).border(1.dp, GlassBorder, CircleShape)
-        .clickable { onClick() }, Alignment.Center) { T(label, 20.sp) }
-}
-
-@Composable
-fun GPill(label: String, onClick: () -> Unit) {
-    Row(Modifier.clip(RoundedCornerShape(50)).background(Color.Black.copy(.35f)).border(1.dp, GlassBorder, RoundedCornerShape(50))
-        .clickable { onClick() }.padding(start = 24.dp, end = 6.dp).height(50.dp).widthIn(min = 220.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-        T(label, 15.sp)
-        Box(Modifier.size(38.dp).clip(CircleShape).background(Color.White), Alignment.Center) { T("+", 22.sp, Color.Black) }
+fun Thumb(d: Doc, m: Modifier) {
+    val ctx = LocalContext.current
+    val bmp by produceState<ImageBitmap?>(null, d.uri) { value = withContext(Dispatchers.IO) { thumb(ctx, d) } }
+    Box(m.clip(RoundedCornerShape(14.dp)).background(Color.White), Alignment.Center) {
+        val b = bmp
+        if (b != null) Image(b, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop, alignment = Alignment.TopCenter)
+        else Ico("doc", Color.Gray, 34.dp)
     }
 }
 
-@Composable fun MLabel(t: String, m: Modifier = Modifier) = T(t, 14.sp, Color.White.copy(.85f), modifier = m)
-@Composable fun Metric(v: String, u: String) = Row(verticalAlignment = Alignment.Bottom) {
-    T(v, 34.sp); Spacer(Modifier.width(4.dp)); T(u, 14.sp, modifier = Modifier.padding(bottom = 6.dp))
-}
-
-// ---------------- Dashboard ----------------
+// ---------- claim screen ----------
 @Composable
-fun DashboardScreen(readings: List<Reading>, vitD: Int, tick: () -> Unit, onSetup: () -> Unit,
-                    onScan: () -> Unit, onAdd: () -> Unit, onVitD: () -> Unit) {
-    val days = remember { (6 downTo 0).map { d -> Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -d) } } }
-    var sel by remember { mutableStateOf(6) }
-    val dayReadings = readings.filter { sameDay(it.t, days[sel].timeInMillis) }.sortedBy { it.t }
-    val s = stats(dayReadings)
-    val letter = SimpleDateFormat("EEEEE", Locale.getDefault())
-
+fun ClaimScreen(ui: Ui, tick: () -> Unit, onBack: () -> Unit, onChat: () -> Unit,
+                onEdit: () -> Unit, onAdd: () -> Unit, onOpen: (Doc) -> Unit) {
+    val scroll = rememberScrollState()
+    val docScroll = rememberScrollState()
+    val scope = rememberCoroutineScope()
     Box(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 96.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                GCircle("←", 40.dp) { tick(); onSetup() }
-                Spacer(Modifier.weight(1f))
-                days.forEachIndexed { i, c ->
-                    val on = i == sel
-                    Box(Modifier.size(34.dp).clip(CircleShape).background(if (on) Color.White else Color.Transparent)
-                        .border(1.dp, Color.White.copy(.6f), CircleShape).clickable { tick(); sel = i }, Alignment.Center) {
-                        T(letter.format(c.time), 13.sp, if (on) Color.Black else Color.White)
-                    }
-                }
-            }
-            Column(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                T("Sugar", 20.sp)
-                Spacer(Modifier.height(12.dp))
-                DotText(s.last?.toString() ?: "--", 7.dp)
-                Spacer(Modifier.height(8.dp))
-                T("mg/dL", 16.sp)
-                if (s.last == null) T("No readings — tap + to add yours", 13.sp, Color.White.copy(.6f), modifier = Modifier.padding(top = 6.dp))
-            }
-            Canvas(Modifier.fillMaxWidth().height(80.dp)) {
-                drawLine(Color.White.copy(.85f), Offset(0f, size.height / 2), Offset(size.width, size.height / 2), 2f)
-                if (dayReadings.size >= 2) {
-                    val vs = dayReadings.map { it.v }
-                    val lo = vs.min().toFloat(); val hi = max(vs.max().toFloat(), lo + 10f)
-                    fun y(v: Int) = size.height - 10f - (v - lo) / (hi - lo) * (size.height - 20f)
-                    val n = vs.size; val w = size.width - 20f
-                    val p = Path()
-                    vs.forEachIndexed { i, v ->
-                        val x = i * w / (n - 1) + 10f
-                        if (i == 0) p.moveTo(x, y(v)) else {
-                            val px = (i - 1) * w / (n - 1) + 10f
-                            p.cubicTo((px + x) / 2, y(vs[i - 1]), (px + x) / 2, y(v), x, y(v))
-                        }
-                    }
-                    drawPath(p, Yellow, style = Stroke(3f, cap = StrokeCap.Round))
-                    drawCircle(Yellow, 7f, Offset(w + 10f, y(vs.last())))
-                }
-            }
-            GCard(Modifier.fillMaxWidth().height(130.dp), Brush.linearGradient(listOf(Color(0xCC6A5473), Color(0xCCE08080)))) {
-                Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.SpaceBetween) {
-                        MLabel("Average Glucose"); Metric(s.avg?.toString() ?: "--", "mg/dl")
-                    }
-                    Box(Modifier.size(84.dp).border(1.dp, Color.White.copy(.5f), CircleShape), Alignment.Center) {
-                        DotText(s.avg?.toString() ?: "--", 3.dp)
-                    }
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                GCard(Modifier.weight(1f).height(150.dp), Brush.radialGradient(listOf(Color(0xE605060A), Color(0xCC7FA58F)), radius = 380f)) {
-                    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceBetween) {
-                        MLabel("Time in range")
-                        Canvas(Modifier.fillMaxWidth().height(26.dp)) {
-                            drawLine(Brush.horizontalGradient(listOf(Color.Gray, Color(0xFFE05050))), Offset(0f, 16f), Offset(size.width, 16f), 8f, StrokeCap.Round)
-                            s.tir?.let { val x = size.width * it / 100f
-                                val tri = Path().apply { moveTo(x, 4f); lineTo(x - 7f, -6f + 0f); lineTo(x + 7f, -6f) }
-                                drawCircle(Yellow, 7f, Offset(x, 16f)) }
-                        }
-                        Metric(s.tir?.toString() ?: "--", "%")
-                    }
-                }
-                GCard(Modifier.weight(1f).height(150.dp), Brush.radialGradient(listOf(Color(0xE68A0A4F), Color(0xCCE88BC4)), radius = 330f)) {
-                    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceBetween) {
-                        MLabel("Viriability")
-                        Canvas(Modifier.fillMaxWidth().height(20.dp)) {
-                            for (i in 0..8) drawCircle(Color.White, 2f + i * .7f, Offset(i * size.width / 8.5f + 6f, 10f))
-                        }
-                        Metric(s.cv?.let { String.format(Locale.US, "%.1f", it) } ?: "--", "%")
-                    }
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                GCard(Modifier.weight(1f).height(150.dp), Brush.radialGradient(listOf(Color(0xE603050F), Color(0xCC2B4FC8)), radius = 380f), click = { tick(); onVitD() }) {
-                    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceBetween) {
-                        MLabel("Vitamin D")
-                        Canvas(Modifier.fillMaxWidth().height(30.dp)) {
-                            for (i in 0..20) drawLine(Color.White.copy(.4f), Offset(i * size.width / 20f, 10f), Offset(i * size.width / 20f, 28f), 2f)
-                            if (vitD >= 0) { val x = size.width * (vitD.coerceAtMost(100) / 100f)
-                                drawLine(Yellow, Offset(x, 0f), Offset(x, 28f), 4f) }
-                        }
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
-                            T(if (vitD >= 0) vitD.toString() else "--", 34.sp)
-                            T(if (vitD < 0) "Tap to add" else if (vitD >= 30) "Good" else if (vitD >= 20) "Fair" else "Low", 14.sp)
-                        }
-                    }
-                }
-                GCard(Modifier.weight(1f).height(150.dp), Brush.linearGradient(listOf(Color(0xCCB5502A), Color(0xCCE0703A))), click = { tick(); onScan() }) {
-                    Box(Modifier.align(Alignment.CenterEnd).size(70.dp).clip(CircleShape).background(Brush.radialGradient(listOf(Color(0xFF3050E0), Color.Transparent))))
-                    MLabel("Spikes", Modifier.align(Alignment.TopStart))
-                    Box(Modifier.align(Alignment.BottomStart)) { Metric(s.spikes?.toString() ?: "--", "%") }
-                }
-            }
-        }
-        Box(Modifier.align(Alignment.BottomEnd).padding(8.dp).size(62.dp).clip(CircleShape)
-            .background(Color.White.copy(.16f)).border(1.dp, GlassBorder, CircleShape)
-            .clickable { tick(); onAdd() }, Alignment.Center) { T("+", 30.sp) }
-    }
-}
-
-// ---------------- Reminder / Complete setup ----------------
-@Composable
-fun Knob(value: Int, max: Int, step: Int, fill: Color, tick: () -> Unit, onChange: (Int) -> Unit) {
-    val cur by rememberUpdatedState(value)
-    val upd by rememberUpdatedState(onChange)
-    var acc by remember { mutableStateOf(0f) }
-    Row(Modifier.pointerInput(max) {
-        detectVerticalDragGestures { _, d ->
-            acc -= d
-            if (abs(acc) > 24f) { val dir = if (acc > 0) 1 else -1; acc = 0f; upd(((cur + dir * step) % max + max) % max); tick() }
-        }
-    }.clickable { upd((cur + step) % max); tick() }, verticalAlignment = Alignment.CenterVertically) {
-        Canvas(Modifier.size(30.dp)) {
-            drawCircle(fill)
-            val a = (value.toFloat() / max) * 2f * PI.toFloat() - PI.toFloat() / 2f
-            drawLine(Color.Black.copy(.5f), center, center + Offset(cos(a), sin(a)) * (size.minDimension / 2 - 4f), 3f, StrokeCap.Round)
-        }
-        Spacer(Modifier.width(10.dp)); T(value.toString().padStart(2, '0'), 16.sp)
-    }
-}
-
-@Composable
-fun ReminderScreen(ctx: Context, store: Store, tick: () -> Unit, thud: () -> Unit, onBack: () -> Unit, onStart: () -> Unit) {
-    var on by remember { mutableStateOf(store.remOn) }
-    var hours by remember { mutableStateOf(store.remHours.toFloat()) }
-    var hh by remember { mutableStateOf(store.remH) }
-    var mm by remember { mutableStateOf(store.remM) }
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
-    val now = remember { Calendar.getInstance() }
-    fun commit() {
-        store.remOn = on; store.remHours = hours.roundToInt(); store.remH = hh; store.remM = mm
-        scheduleReminder(ctx, on, hours.roundToInt(), hh, mm)
-    }
-    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            GCircle("←", 44.dp) { tick(); commit(); onBack() }; T("Complete setup", 22.sp)
-        }
-        val shape = RoundedCornerShape(48.dp)
-        Box(Modifier.fillMaxSize().clip(shape).background(Mauve.copy(.78f)).border(1.dp, GlassBorder, shape)) {
-            Box(Modifier.fillMaxWidth().height(430.dp).background(Brush.radialGradient(
-                listOf(Color(0xFF4A0B3A), Color(0xFFD22A86), Color(0xFFE266AE), Color.Transparent), radius = 620f)))
-            Row(Modifier.fillMaxWidth().padding(24.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                T("Reminder", 22.sp)
-                Row(Modifier.clip(RoundedCornerShape(50)).background(Color.Black.copy(.3f)).clickable {
-                    on = !on; thud()
-                    if (on && Build.VERSION.SDK_INT >= 33) launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                }.padding(6.dp).width(84.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    if (on) { T("On", 14.sp, modifier = Modifier.padding(start = 10.dp)); Box(Modifier.size(30.dp).clip(CircleShape).background(Color.White)) }
-                    else { Box(Modifier.size(30.dp).clip(CircleShape).background(Color.White)); T("Off", 14.sp, modifier = Modifier.padding(end = 10.dp)) }
-                }
-            }
-            Column(Modifier.align(Alignment.TopCenter).padding(top = 130.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                DotText(hours.roundToInt().toString(), 9.dp)
-                Spacer(Modifier.height(10.dp)); T("hours", 18.sp)
-                Spacer(Modifier.height(20.dp))
-                Canvas(Modifier.fillMaxWidth().height(50.dp).pointerInput(Unit) {
-                    detectHorizontalDragGestures { _, d ->
-                        val old = hours.roundToInt()
-                        hours = (hours - d / 40f).coerceIn(1f, 24f)
-                        if (hours.roundToInt() != old) tick()
-                    }
-                }) {
-                    val gap = 18f; val c = size.width / 2
-                    for (i in -12..12) {
-                        val x = c + i * gap - ((hours % 1f) * gap)
-                        drawLine(Color.White.copy((.5f - abs(i) * .035f).coerceAtLeast(.05f)), Offset(x, 14f), Offset(x, if (i % 3 == 0) 44f else 32f), 2f)
-                    }
-                    drawLine(Yellow, Offset(c, 6f), Offset(c, 48f), 5f, StrokeCap.Round)
-                }
-                Spacer(Modifier.height(24.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    repeat(4) { Box(Modifier.size(6.dp).clip(CircleShape).background(Color.White.copy(if (it == 0) 1f else .5f))) }
-                }
-            }
-            Row(Modifier.align(Alignment.BottomStart).padding(start = 24.dp, bottom = 110.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+        Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(bottom = 90.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                Circle("‹", Dark, sz = 54.dp) { tick(); onBack() }
                 Column {
-                    T(SimpleDateFormat("EEE", Locale.getDefault()).format(now.time).lowercase(), 16.sp)
-                    Spacer(Modifier.height(6.dp))
-                    DotText(now.get(Calendar.DAY_OF_MONTH).toString().padStart(2, '0'), 3.dp, Color.White.copy(.8f))
-                }
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Knob(hh, 24, 1, Color.White, tick) { hh = it }
-                    Knob(mm, 60, 5, Pink, tick) { mm = it }
+                    T(if (ui.name.isBlank()) "Hi!" else "Hi, ${ui.name.trim().split(" ").first()}!", 24.sp, weight = FontWeight.Medium)
+                    T(STATUS[ui.stage.coerceIn(0, 3)], 13.sp)
                 }
             }
-            Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp)) {
-                GPill("Start tracking") { thud(); commit(); onStart() }
-            }
-        }
-    }
-}
-
-// ---------------- Scan ----------------
-@Composable
-fun ScanScreen(tick: () -> Unit, thud: () -> Unit, onBack: () -> Unit, onLog: () -> Unit) {
-    var tracking by remember { mutableStateOf(false) }
-    val t = rememberInfiniteTransition(label = "s")
-    val sweep by t.animateFloat(0f, 360f, infiniteRepeatable(tween(4000, easing = LinearEasing)), label = "a")
-    Column(Modifier.fillMaxSize()) {
-        Box(Modifier.fillMaxWidth().height(190.dp)) {
-            Box(Modifier.align(Alignment.Center).offset(40.dp, 10.dp).size(200.dp).blur(60.dp, BlurredEdgeTreatment.Unbounded).background(Yellow.copy(.5f), CircleShape))
-            Box(Modifier.align(Alignment.Center).offset((-50).dp, 20.dp).size(180.dp).blur(60.dp, BlurredEdgeTreatment.Unbounded).background(Pink.copy(.5f), CircleShape))
-            Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) { GCircle("←", 44.dp) { tick(); onBack() } }
-            T("H.INC", 30.sp, modifier = Modifier.align(Alignment.Center))
-        }
-        val shape = RoundedCornerShape(48.dp)
-        Box(Modifier.fillMaxSize().clip(shape).background(Brush.radialGradient(
-            listOf(Color(0xF005061A), Color(0xF005061A), Color(0xCC8DBBA5)), radius = 900f)).border(1.dp, GlassBorder, shape)) {
-            Text(if (tracking) "Tracking sensor…" else "Move camera closer\nto a sensor", color = Color.White, fontSize = 20.sp,
-                fontWeight = FontWeight.Light, fontFamily = FontFamily.SansSerif, lineHeight = 26.sp, textAlign = TextAlign.Center,
-                modifier = Modifier.align(Alignment.TopCenter).padding(top = 32.dp))
-            Canvas(Modifier.align(Alignment.Center).size(300.dp)) {
-                val c = center; val R = size.minDimension / 2
-                for (i in 0 until 120) {
-                    val a = i * 3f * PI.toFloat() / 180f
-                    val len = if (i % 5 == 0) 12f else 7f
-                    drawLine(Color.White.copy(.75f), c + Offset(cos(a), sin(a)) * (R - len), c + Offset(cos(a), sin(a)) * R, 2f)
+            Column(Modifier.padding(top = 6.dp)) {
+                Canvas(Modifier.fillMaxWidth().height(24.dp)) {
+                    val cw = size.width / 4; val cy = size.height / 2
+                    fun cx(i: Int) = cw * (i + .5f)
+                    drawLine(Color(0xFF2A2A2D), Offset(cx(0), cy), Offset(cx(3), cy), 16f, StrokeCap.Round)
+                    var x = cx(0)
+                    while (x < cx(ui.stage)) { drawCircle(Color.White, 2f, Offset(x, cy)); x += 12f }
+                    for (i in 0..3) {
+                        val c = when { i == 3 -> Lime; i == ui.stage -> Blue; i < ui.stage -> Color.White; else -> Color(0xFF3A3A3D) }
+                        drawCircle(c, 10f, Offset(cx(i), cy))
+                        if (i < ui.stage) drawCircle(Color.Black, 4f, Offset(cx(i), cy))
+                    }
                 }
-                val a = (if (tracking) sweep else 135f) * PI.toFloat() / 180f
-                for (k in 0..3) {
-                    val aa = a + k * .06f
-                    drawLine(if (k == 1) Yellow else Color.White, c + Offset(cos(aa), sin(aa)) * (R - 46f),
-                        c + Offset(cos(aa), sin(aa)) * (R - 6f), if (k == 1) 5f else 2f)
-                }
-                drawCircle(Color.White.copy(.35f), R * .62f, c, style = Stroke(2f))
-                drawCircle(Color(0xFFF4F4F6), R * .5f, c)
-                drawCircle(Color.Gray, 6f, c)
-            }
-            Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 28.dp)) {
-                GPill(if (tracking) "Log reading" else "Start tracking") {
-                    thud()
-                    if (tracking) { tracking = false; onLog() } else tracking = true
+                Row(Modifier.padding(top = 6.dp)) {
+                    STAGES.forEachIndexed { i, l ->
+                        Box(Modifier.weight(1f).clickable { tick(); ui.setStage(i) }, Alignment.Center) { T(l, 11.sp, align = TextAlign.Center) }
+                    }
                 }
             }
-        }
-    }
-}
-
-// ---------------- Add dialog ----------------
-@Composable
-fun AddDialog(kind: String, onDismiss: () -> Unit, onSave: (Int) -> Unit) {
-    var text by remember { mutableStateOf("") }
-    val glucose = kind == "glucose"
-    val v = text.toIntOrNull()
-    val ok = v != null && (if (glucose) v in 20..600 else v in 1..200)
-    val fr = remember { FocusRequester() }
-    LaunchedEffect(Unit) { fr.requestFocus() }
-    val shape = RoundedCornerShape(36.dp)
-    Dialog(onDismissRequest = onDismiss) {
-        Column(Modifier.clip(shape).background(Color(0xE61A1A20)).border(1.dp, GlassBorder, shape).padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally) {
-            T(if (glucose) "Add reading" else "Vitamin D", 20.sp)
-            Spacer(Modifier.height(16.dp))
-            BasicTextField(value = text, onValueChange = { if (it.length <= 3 && it.all { c -> c.isDigit() }) text = it },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true,
-                textStyle = TextStyle(color = Color.White, fontSize = 56.sp, fontWeight = FontWeight.Light, textAlign = TextAlign.Center),
-                cursorBrush = SolidColor(Yellow), modifier = Modifier.width(160.dp).focusRequester(fr),
-                decorationBox = { inner -> Box(contentAlignment = Alignment.Center) {
-                    if (text.isEmpty()) T("0", 56.sp, Color.White.copy(.25f)); inner() } })
-            T(if (glucose) "mg/dL" else "ng/mL", 15.sp, Color.White.copy(.7f))
-            Spacer(Modifier.height(20.dp))
+            Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(36.dp)).background(Blue).clickable { tick(); onEdit() }.padding(20.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Box(Modifier.size(52.dp).clip(CircleShape).background(Color.White.copy(.25f)), Alignment.Center) {
+                            T(ui.name.trim().firstOrNull()?.uppercase() ?: "+", 22.sp)
+                        }
+                        T(if (ui.name.isBlank()) "Tap to add your claim" else ui.name, 20.sp, weight = FontWeight.Medium)
+                    }
+                    Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { T("Date of service", 14.sp); T(ui.dos.ifBlank { "--" }, 14.sp) }
+                    Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { T("Claim ID", 14.sp); T(ui.cid.ifBlank { "--" }, 14.sp) }
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Box(Modifier.clip(RoundedCornerShape(50)).border(1.dp, GlassBorder, RoundedCornerShape(50))
-                    .clickable { onDismiss() }.padding(horizontal = 26.dp, vertical = 12.dp)) { T("Cancel", 15.sp) }
-                Box(Modifier.clip(RoundedCornerShape(50)).background(Color.White.copy(if (ok) 1f else .25f))
-                    .clickable(enabled = ok) { onSave(v!!) }.padding(horizontal = 30.dp, vertical = 12.dp)) { T("Save", 15.sp, Color.Black) }
+                val sh = RoundedCornerShape(34.dp)
+                Box(Modifier.weight(1f).height(170.dp).clip(sh).background(Color.Black).border(1.dp, Color(0xFF3A3A3D), sh)
+                    .clickable { tick(); onEdit() }.padding(18.dp)) {
+                    Ico("doc", Color.White)
+                    Column(Modifier.align(Alignment.BottomStart)) { T("Your plan pays", 13.sp); T(money(ui.plan), 36.sp, weight = FontWeight.Medium) }
+                }
+                Box(Modifier.weight(1f).height(170.dp).clip(sh).background(Lime).clickable { tick(); onEdit() }.padding(18.dp)) {
+                    Ico("coin", Color.Black)
+                    Column(Modifier.align(Alignment.BottomStart)) { T("You need to pay", 13.sp, Color.Black); T(money(ui.pay), 36.sp, Color.Black, FontWeight.Medium) }
+                }
+            }
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(36.dp)).background(Color.White).padding(18.dp)) {
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                    T("Documents", 20.sp, Color.Black, FontWeight.Medium)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Circle("←", Soft, Color.Black) { tick(); scope.launch { docScroll.animateScrollTo((docScroll.value - 320).coerceAtLeast(0)) } }
+                        Circle("→", Color.Black) { tick(); scope.launch { docScroll.animateScrollTo(docScroll.value + 320) } }
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+                Row(Modifier.horizontalScroll(docScroll), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ui.docs.forEachIndexed { i, d ->
+                        val first = i == 0
+                        Column(Modifier.width(150.dp).height(210.dp).clip(RoundedCornerShape(28.dp))
+                            .background(if (first) Color.Black else Soft).clickable { tick(); onOpen(d) }.padding(14.dp)) {
+                            T(DAY.format(Date(d.t)), 11.sp, if (first) Color(0xFFAAAAAA) else Color(0xFF777777))
+                            T(d.cat, 16.sp, if (first) Color.White else Color.Black, FontWeight.Medium)
+                            Spacer(Modifier.height(10.dp))
+                            Thumb(d, Modifier.fillMaxWidth().weight(1f))
+                        }
+                    }
+                    Column(Modifier.width(150.dp).height(210.dp).clip(RoundedCornerShape(28.dp)).background(Soft)
+                        .clickable { tick(); onAdd() }, Arrangement.Center, Alignment.CenterHorizontally) {
+                        T("+", 40.sp, Color.Black); T("Add document", 13.sp, Color.Black)
+                    }
+                }
+            }
+        }
+        Row(Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp).clip(RoundedCornerShape(50)).background(Blue)
+            .clickable { tick(); onChat() }.padding(start = 24.dp, end = 6.dp).height(56.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            T("Broker chat", 16.sp, weight = FontWeight.Medium)
+            Box(Modifier.size(44.dp).clip(CircleShape).background(Color.Black), Alignment.Center) { T("→", 18.sp) }
+        }
+    }
+}
+
+
+// ---------- chat ----------
+@Composable
+fun ChatScreen(ui: Ui, tick: () -> Unit, thud: () -> Unit, onBack: () -> Unit, onAttach: (String) -> Unit) {
+    var text by remember { mutableStateOf("") }
+    var last by remember { mutableStateOf("Surgery bill") }
+    val scroll = rememberScrollState()
+    LaunchedEffect(ui.msgs.size) { scroll.animateScrollTo(scroll.maxValue) }
+    val items = listOf("Attach new\nsurgery bill" to "Surgery bill", "Attach your\nID Card" to "ID Card", "Attach new\ninvoices" to "Invoices",
+        "Attach payment\nrecords" to "Payment records", "Attach bank\nrecords" to "Bank records", "Attach legal\ndocuments" to "Legal documents")
+    val icons = listOf("doc", "card", "doc", "card", "bank", "doc")
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            Circle("←", Color.White.copy(.2f)) { tick(); onBack() }
+            T("Broker\nChat", 26.sp, weight = FontWeight.Medium)
+            Spacer(Modifier.weight(1f))
+            Circle("×", Color.White.copy(.2f)) { tick(); onBack() }
+        }
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll).padding(vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (ui.msgs.isEmpty()) T("Write to your broker or attach a document below. Messages are saved on this device.", 14.sp, Color.White.copy(.85f))
+            ui.msgs.forEach { m ->
+                Row(Modifier.fillMaxWidth(), Arrangement.End, Alignment.Bottom) {
+                    T(CLOCK.format(Date(m.t)), 11.sp, Color.White.copy(.75f), modifier = Modifier.padding(end = 8.dp, bottom = 4.dp))
+                    Box(Modifier.widthIn(max = 250.dp).clip(RoundedCornerShape(24.dp)).background(Color.White).padding(horizontal = 18.dp, vertical = 12.dp)) {
+                        T(m.text, 14.sp, Color.Black)
+                    }
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(50)).background(Color.White.copy(.2f)).padding(6.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(Modifier.size(38.dp).clip(CircleShape).clickable { tick(); text += "🙂" }, Alignment.Center) { T("🙂", 18.sp) }
+            BasicTextField(text, { text = it }, Modifier.weight(1f),
+                textStyle = TextStyle(color = Color.White, fontSize = 15.sp, fontFamily = FontFamily.SansSerif),
+                cursorBrush = SolidColor(Color.White), singleLine = true,
+                decorationBox = { inner -> Box { if (text.isEmpty()) T("Type something…", 15.sp, Color.White.copy(.65f)); inner() } })
+            Box(Modifier.size(38.dp).clip(CircleShape).clickable { tick(); onAttach(last) }, Alignment.Center) { Ico("doc", Color.White, 22.dp) }
+            Box(Modifier.size(44.dp).clip(CircleShape).background(Color.Black).clickable {
+                if (text.isNotBlank()) { ui.addMsg(text.trim()); text = ""; thud() }
+            }, Alignment.Center) {
+                Canvas(Modifier.size(20.dp)) {
+                    val p = Path().apply { moveTo(size.width, 0f); lineTo(0f, size.height * .5f); lineTo(size.width * .4f, size.height * .6f); close() }
+                    drawPath(p, Color.White, style = Stroke(3f, join = StrokeJoin.Round))
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (r in 0..1) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (c in 0..2) {
+                    val k = r * 3 + c; val sel = items[k].second == last
+                    Box(Modifier.weight(1f).height(110.dp).clip(RoundedCornerShape(26.dp)).background(if (sel) Color.Black else Color.White)
+                        .clickable { tick(); last = items[k].second; onAttach(items[k].second) }.padding(12.dp)) {
+                        Ico(icons[k], if (sel) Color.White else Color.Black, 24.dp)
+                        T(items[k].first, 11.sp, if (sel) Color.White else Color.Black, modifier = Modifier.align(Alignment.BottomStart))
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------- uploaded sheet ----------
+@Composable
+fun UploadedSheet(docs: List<Doc>, onOpen: (Doc) -> Unit, onClose: () -> Unit) {
+    val none = remember { MutableInteractionSource() }
+    Box(Modifier.fillMaxSize().background(Color.Black.copy(.55f)).clickable(interactionSource = none, indication = null) { onClose() }) {
+        Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(10.dp).clip(RoundedCornerShape(40.dp)).background(Color.White)
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}.padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(Modifier.width(36.dp).height(3.dp).clip(RoundedCornerShape(2.dp)).background(Color.Black))
+            Spacer(Modifier.height(18.dp))
+            Box(Modifier.size(68.dp).clip(CircleShape).background(Lime), Alignment.Center) {
+                Canvas(Modifier.size(24.dp)) {
+                    val p = Path().apply { moveTo(size.width * .1f, size.height * .55f); lineTo(size.width * .4f, size.height * .85f); lineTo(size.width * .92f, size.height * .2f) }
+                    drawPath(p, Color.Black, style = Stroke(5f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            T("Uploaded", 34.sp, Color.Black, FontWeight.Medium)
+            T(if (docs.size == 1) "Your document was successfully uploaded" else "Your documents were successfully uploaded", 13.sp, Color.Black)
+            Spacer(Modifier.height(16.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                docs.take(2).forEach { d ->
+                    Box(Modifier.weight(1f).height(210.dp).clip(RoundedCornerShape(30.dp)).background(Soft).padding(12.dp)) {
+                        Thumb(d, Modifier.fillMaxWidth().height(120.dp))
+                        T(d.cat, 14.sp, Color.Black, modifier = Modifier.align(Alignment.BottomStart))
+                        Box(Modifier.align(Alignment.BottomEnd).size(44.dp).clip(CircleShape).background(Color.Black).clickable { onOpen(d) }, Alignment.Center) { T("↗", 18.sp) }
+                    }
+                }
+                if (docs.size == 1) Spacer(Modifier.weight(1f))
+            }
+            if (docs.size > 2) T("+${docs.size - 2} more in Documents", 13.sp, Color(0xFF777777), modifier = Modifier.padding(top = 10.dp))
+            Spacer(Modifier.height(14.dp))
+            Box(Modifier.clip(RoundedCornerShape(50)).background(Color.Black).clickable { onClose() }.padding(horizontal = 40.dp, vertical = 14.dp)) { T("Done", 15.sp) }
+        }
+    }
+}
+
+// ---------- edit dialog ----------
+@Composable
+fun Field(label: String, value: String, kb: KeyboardType = KeyboardType.Text, onClick: (() -> Unit)? = null, onChange: (String) -> Unit) {
+    Column {
+        T(label, 12.sp, Color(0xFF777777), modifier = Modifier.padding(bottom = 4.dp, start = 4.dp))
+        Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Soft)
+            .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier).padding(14.dp)) {
+            if (onClick != null) T(value.ifBlank { "Select date" }, 16.sp, Color.Black)
+            else BasicTextField(value, onChange, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = kb),
+                textStyle = TextStyle(color = Color.Black, fontSize = 16.sp, fontFamily = FontFamily.SansSerif),
+                cursorBrush = SolidColor(Blue), modifier = Modifier.fillMaxWidth())
+        }
+    }
+}
+
+@Composable
+fun EditDialog(ui: Ui, onClose: () -> Unit, thud: () -> Unit) {
+    val act = LocalContext.current
+    var name by remember { mutableStateOf(ui.name) }
+    var dos by remember { mutableStateOf(ui.dos) }
+    var cid by remember { mutableStateOf(ui.cid) }
+    var plan by remember { mutableStateOf(if (ui.plan >= 0) ui.plan.toString() else "") }
+    var pay by remember { mutableStateOf(if (ui.pay >= 0) ui.pay.toString() else "") }
+    val shape = RoundedCornerShape(36.dp)
+    Dialog(onDismissRequest = onClose) {
+        Column(Modifier.clip(shape).background(Color.White).verticalScroll(rememberScrollState()).padding(22.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            T("Claim details", 22.sp, Color.Black, FontWeight.Medium)
+            Field("Full name", name) { name = it }
+            Field("Date of service", dos, onClick = {
+                val cal = Calendar.getInstance()
+                DatePickerDialog(act, { _, y, m, d -> dos = String.format(Locale.US, "%02d/%02d/%02d", d, m + 1, y % 100) },
+                    cal.get(Calendar.YEAR), cal.get(Calendar.MONTH), cal.get(Calendar.DAY_OF_MONTH)).show()
+            }) {}
+            Field("Claim ID", cid) { cid = it.uppercase() }
+            Field("Your plan pays ($)", plan, KeyboardType.Number) { if (it.length <= 7 && it.all { c -> c.isDigit() }) plan = it }
+            Field("You need to pay ($)", pay, KeyboardType.Number) { if (it.length <= 7 && it.all { c -> c.isDigit() }) pay = it }
+            Spacer(Modifier.height(4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Box(Modifier.weight(1f).clip(RoundedCornerShape(50)).background(Soft).clickable { onClose() }.padding(vertical = 14.dp), Alignment.Center) { T("Cancel", 15.sp, Color.Black) }
+                Box(Modifier.weight(1f).clip(RoundedCornerShape(50)).background(Blue).clickable {
+                    ui.name = name.trim(); ui.dos = dos; ui.cid = cid.trim()
+                    ui.plan = plan.toIntOrNull() ?: -1; ui.pay = pay.toIntOrNull() ?: -1
+                    ui.save(); thud(); onClose()
+                }.padding(vertical = 14.dp), Alignment.Center) { T("Save", 15.sp) }
             }
         }
     }
