@@ -1,56 +1,101 @@
 package com.hinc.app
 
+import android.app.*
 import android.content.Context
+import android.content.BroadcastReceiver
+import android.content.Intent
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Calendar
+import java.util.Locale
 
-data class Doc(val uri: String, val name: String, val cat: String, val t: Long, val mime: String)
-data class Msg(val text: String, val t: Long)
+data class Pt(val lat: Double, val lon: Double)
+data class Run(val t: Long, val dist: Float, val secs: Int, val bpm: Int, val pts: List<Pt>)
 
 class Store(ctx: Context) {
-    private val sp = ctx.getSharedPreferences("hinc_claims", Context.MODE_PRIVATE)
-    private fun str(k: String) = sp.getString(k, "") ?: ""
-    var name: String
-        get() = str("name")
-        set(x) { sp.edit().putString("name", x).apply() }
-    var dos: String
-        get() = str("dos")
-        set(x) { sp.edit().putString("dos", x).apply() }
-    var cid: String
-        get() = str("cid")
-        set(x) { sp.edit().putString("cid", x).apply() }
+    private val sp = ctx.getSharedPreferences("hinc_run", Context.MODE_PRIVATE)
+    var goal: Int
+        get() = sp.getInt("goal", 0)
+        set(x) { sp.edit().putInt("goal", x).apply() }
     var plan: Int
-        get() = sp.getInt("plan", -1)
+        get() = sp.getInt("plan", 0)
         set(x) { sp.edit().putInt("plan", x).apply() }
-    var pay: Int
-        get() = sp.getInt("pay", -1)
-        set(x) { sp.edit().putInt("pay", x).apply() }
-    var stage: Int
-        get() = sp.getInt("stage", 0)
-        set(x) { sp.edit().putInt("stage", x).apply() }
+    var unit: Int
+        get() = sp.getInt("unit", 0)
+        set(x) { sp.edit().putInt("unit", x).apply() }
+    var theme: Int
+        get() = sp.getInt("theme", 0)
+        set(x) { sp.edit().putInt("theme", x).apply() }
+    var remOn: Boolean
+        get() = sp.getBoolean("remOn", false)
+        set(x) { sp.edit().putBoolean("remOn", x).apply() }
+    var remH: Int
+        get() = sp.getInt("remH", 7)
+        set(x) { sp.edit().putInt("remH", x).apply() }
+    var remM: Int
+        get() = sp.getInt("remM", 0)
+        set(x) { sp.edit().putInt("remM", x).apply() }
 
-    fun docs(): List<Doc> = runCatching {
-        val a = JSONArray(sp.getString("docs", "[]"))
+    fun runs(): List<Run> = runCatching {
+        val a = JSONArray(sp.getString("runs", "[]"))
         (0 until a.length()).map {
             val o = a.getJSONObject(it)
-            Doc(o.getString("u"), o.getString("n"), o.getString("c"), o.getLong("t"), o.getString("m"))
+            val pts = o.getString("p").split(";").mapNotNull { s ->
+                val q = s.split(",")
+                if (q.size == 2) Pt(q[0].toDouble(), q[1].toDouble()) else null
+            }
+            Run(o.getLong("t"), o.getDouble("d").toFloat(), o.getInt("s"), o.getInt("b"), pts)
         }
     }.getOrDefault(emptyList())
 
-    fun saveDocs(l: List<Doc>) {
+    fun saveRuns(l: List<Run>) {
         val a = JSONArray()
-        l.forEach { a.put(JSONObject().put("u", it.uri).put("n", it.name).put("c", it.cat).put("t", it.t).put("m", it.mime)) }
-        sp.edit().putString("docs", a.toString()).apply()
+        l.forEach { r ->
+            val step = if (r.pts.size > 400) r.pts.size / 400 + 1 else 1
+            val p = r.pts.filterIndexed { i, _ -> i % step == 0 }
+                .joinToString(";") { String.format(Locale.US, "%.5f,%.5f", it.lat, it.lon) }
+            a.put(JSONObject().put("t", r.t).put("d", r.dist.toDouble()).put("s", r.secs).put("b", r.bpm).put("p", p))
+        }
+        sp.edit().putString("runs", a.toString()).apply()
     }
+}
 
-    fun msgs(): List<Msg> = runCatching {
-        val a = JSONArray(sp.getString("msgs", "[]"))
-        (0 until a.length()).map { val o = a.getJSONObject(it); Msg(o.getString("x"), o.getLong("t")) }
-    }.getOrDefault(emptyList())
+fun weekStart(now: Long): Long {
+    val c = Calendar.getInstance()
+    c.firstDayOfWeek = Calendar.MONDAY
+    c.timeInMillis = now
+    c.set(Calendar.DAY_OF_WEEK, Calendar.MONDAY)
+    c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0); c.set(Calendar.SECOND, 0); c.set(Calendar.MILLISECOND, 0)
+    return c.timeInMillis
+}
+fun dayIndex(t: Long): Int = (Calendar.getInstance().apply { timeInMillis = t }.get(Calendar.DAY_OF_WEEK) + 5) % 7
+fun dayKey(t: Long): Int {
+    val c = Calendar.getInstance().apply { timeInMillis = t }
+    return c.get(Calendar.YEAR) * 10000 + c.get(Calendar.MONTH) * 100 + c.get(Calendar.DAY_OF_MONTH)
+}
+fun toUnit(m: Float, unit: Int): Float = if (unit == 0) m / 1000f else m / 1609.344f
+fun unitLabel(unit: Int) = if (unit == 0) "KM" else "MI"
 
-    fun saveMsgs(l: List<Msg>) {
-        val a = JSONArray()
-        l.forEach { a.put(JSONObject().put("x", it.text).put("t", it.t)) }
-        sp.edit().putString("msgs", a.toString()).apply()
+fun scheduleReminder(c: Context, on: Boolean, h: Int, m: Int) {
+    val am = c.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    val pi = PendingIntent.getBroadcast(c, 1, Intent(c, ReminderReceiver::class.java),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+    am.cancel(pi)
+    if (!on) return
+    val cal = Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, h); set(Calendar.MINUTE, m); set(Calendar.SECOND, 0)
+        if (timeInMillis <= System.currentTimeMillis()) add(Calendar.DAY_OF_YEAR, 1)
+    }
+    am.setInexactRepeating(AlarmManager.RTC_WAKEUP, cal.timeInMillis, AlarmManager.INTERVAL_DAY, pi)
+}
+
+class ReminderReceiver : BroadcastReceiver() {
+    override fun onReceive(c: Context, i: Intent) {
+        val nm = c.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.createNotificationChannel(NotificationChannel("hinc", "Run reminders", NotificationManager.IMPORTANCE_DEFAULT))
+        val open = PendingIntent.getActivity(c, 0, Intent(c, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        nm.notify(1, Notification.Builder(c, "hinc").setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("H.INC").setContentText("Time for your run")
+            .setContentIntent(open).setAutoCancel(true).build())
     }
 }

@@ -7,6 +7,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.widget.RemoteViews
+import java.util.Locale
 
 class HincWidget : AppWidgetProvider() {
     override fun onUpdate(c: Context, m: AppWidgetManager, ids: IntArray) {
@@ -16,12 +17,13 @@ class HincWidget : AppWidgetProvider() {
     companion object {
         fun build(c: Context): RemoteViews {
             val s = Store(c)
-            val title = if (s.name.isBlank() && s.cid.isBlank()) "No claim" else listOf("Initiated", "Survey done", "Docs uploaded", "Settled")[s.stage.coerceIn(0, 3)]
+            val week = s.runs().filter { it.t >= weekStart(System.currentTimeMillis()) }
+            val dist = week.sumOf { it.dist.toDouble() }.toFloat()
             val v = RemoteViews(c.packageName, R.layout.widget_hinc)
-            v.setTextViewText(R.id.w_title, title)
-            v.setTextViewText(R.id.w_latest, if (s.plan >= 0) "\$${s.plan}" else "--")
-            v.setTextViewText(R.id.w_avg, if (s.pay >= 0) "\$${s.pay}" else "--")
-            v.setTextViewText(R.id.w_tir, s.docs().size.toString())
+            v.setTextViewText(R.id.w_title, "Run")
+            v.setTextViewText(R.id.w_latest, String.format(Locale.US, "%.1f %s", toUnit(dist, s.unit), unitLabel(s.unit).lowercase()))
+            v.setTextViewText(R.id.w_avg, week.size.toString())
+            v.setTextViewText(R.id.w_tir, if (s.goal > 0) "${s.goal}" + (if (s.unit == 0) "K" else "M") else "--")
             val open = PendingIntent.getActivity(c, 0, Intent(c, MainActivity::class.java),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
             v.setOnClickPendingIntent(R.id.w_root, open)
