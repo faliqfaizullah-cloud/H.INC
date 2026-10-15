@@ -111,7 +111,7 @@ class HincWidget : AppWidgetProvider() {
             }
             val x0 = .097f * sf
             val dist = if (r != null) fmtDist(r.dist, unit) else "0.00"
-            cv.drawText(if (r != null) runTitle(r.t) else "Start a run", x0, .69f * sf, tp(.045f * sf, light, 235, Paint.Align.LEFT))
+            cv.drawText(if (r != null) runTitle(r.t, r.kind) else "Start a run", x0, .69f * sf, tp(.045f * sf, light, 235, Paint.Align.LEFT))
             val big = tp(.15f * sf, thin, 255, Paint.Align.LEFT)
             val smudge = Paint(big).apply { clearShadowLayer(); alpha = 120; maskFilter = BlurMaskFilter(.012f * sf, BlurMaskFilter.Blur.NORMAL) }
             cv.drawText(dist, x0, .85f * sf + .014f * sf, smudge)

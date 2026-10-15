@@ -11,10 +11,13 @@ import java.util.Locale
 
 data class Pt(val lat: Double, val lon: Double)
 data class Scan(val t: Long, val hr: Int, val rmssd: Int)
-data class Run(val t: Long, val dist: Float, val secs: Int, val bpm: Int, val pts: List<Pt>)
+data class Run(val t: Long, val dist: Float, val secs: Int, val bpm: Int, val pts: List<Pt>, val kind: Int = 0)
 
 class Store(ctx: Context) {
-    private val sp = ctx.getSharedPreferences("hinc_run", Context.MODE_PRIVATE)
+    val sp = ctx.getSharedPreferences("hinc_run", Context.MODE_PRIVATE)
+    var bgOn: Boolean
+        get() = sp.getBoolean("bgOn", false)
+        set(x) { sp.edit().putBoolean("bgOn", x).apply() }
     var goal: Int
         get() = sp.getInt("goal", 0)
         set(x) { sp.edit().putInt("goal", x).apply() }
@@ -61,7 +64,7 @@ class Store(ctx: Context) {
                 val q = s.split(",")
                 if (q.size == 2) Pt(q[0].toDouble(), q[1].toDouble()) else null
             }
-            Run(o.getLong("t"), o.getDouble("d").toFloat(), o.getInt("s"), o.getInt("b"), pts)
+            Run(o.getLong("t"), o.getDouble("d").toFloat(), o.getInt("s"), o.getInt("b"), pts, o.optInt("k", 0))
         }
     }.getOrDefault(emptyList())
 
@@ -71,7 +74,7 @@ class Store(ctx: Context) {
             val step = if (r.pts.size > 400) r.pts.size / 400 + 1 else 1
             val p = r.pts.filterIndexed { i, _ -> i % step == 0 }
                 .joinToString(";") { String.format(Locale.US, "%.5f,%.5f", it.lat, it.lon) }
-            a.put(JSONObject().put("t", r.t).put("d", r.dist.toDouble()).put("s", r.secs).put("b", r.bpm).put("p", p))
+            a.put(JSONObject().put("t", r.t).put("d", r.dist.toDouble()).put("s", r.secs).put("b", r.bpm).put("k", r.kind).put("p", p))
         }
         sp.edit().putString("runs", a.toString()).apply()
     }

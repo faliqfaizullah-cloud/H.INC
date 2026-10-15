@@ -2,6 +2,7 @@ package com.hinc.app
 
 import android.Manifest
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -88,9 +89,10 @@ class MainActivity : ComponentActivity() {
 
 data class Shown(val title: String, val dist: Float, val secs: Int, val bpm: Int, val pts: List<Pt>)
 
-fun runTitle(t: Long): String {
+fun runTitle(t: Long, kind: Int = 0): String {
     val h = Calendar.getInstance().apply { timeInMillis = t }.get(Calendar.HOUR_OF_DAY)
-    return when (h) { in 5..11 -> "Morning Run"; in 12..16 -> "Afternoon Run"; in 17..20 -> "Evening Run"; else -> "Night Run" }
+    val p = when (h) { in 5..11 -> "Morning"; in 12..16 -> "Afternoon"; in 17..20 -> "Evening"; else -> "Night" }
+    return p + if (kind == 1) " Walk" else " Run"
 }
 fun fmtTime(s: Int): String = String.format(Locale.US, "%d:%02d", s / 60, s % 60)
 fun fmtDist(m: Float, unit: Int): String = String.format(Locale.US, "%.2f", toUnit(m, unit))
@@ -109,6 +111,28 @@ class Ui(val c: Context) {
     var remH by mutableStateOf(s.remH)
     var remM by mutableStateOf(s.remM)
     var selected by mutableStateOf(-1)
+    var bgOn by mutableStateOf(s.bgOn)
+    var bgAct by mutableStateOf(0)
+    var bgTrk by mutableStateOf(false)
+    var bgDist by mutableStateOf(0f)
+    var bgSecs by mutableStateOf(0)
+    var bgKind by mutableStateOf(0)
+    private val prefL = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        when (key) {
+            "runs" -> { runs = s.runs() }
+            "svcAct", "svcTrk", "svcDist", "svcSecs", "svcKind" -> { syncBg() }
+        }
+    }
+    fun syncBg() {
+        bgAct = s.sp.getInt("svcAct", 0); bgTrk = s.sp.getBoolean("svcTrk", false) && bgOn
+        bgDist = s.sp.getFloat("svcDist", 0f); bgSecs = s.sp.getInt("svcSecs", 0); bgKind = s.sp.getInt("svcKind", 0)
+    }
+    fun attach() { s.sp.registerOnSharedPreferenceChangeListener(prefL); runs = s.runs(); syncBg() }
+    fun detach() { s.sp.unregisterOnSharedPreferenceChangeListener(prefL) }
+    fun setBg(on: Boolean) {
+        s.bgOn = on; bgOn = on
+        if (on) MotionService.start(c) else { MotionService.stop(c); bgTrk = false; bgAct = 0 }
+    }
 
     var tracking by mutableStateOf(false)
     var secs by mutableStateOf(0)
@@ -164,6 +188,7 @@ class Ui(val c: Context) {
 
     fun start() {
         tracking = true; secs = 0; dist = 0f; pts = emptyList(); last = null; speed = -1f
+        s.sp.edit().putBoolean("appTracking", true).apply()
         bpmSum = 0; bpmN = 0; bpm = -1
         try { lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 1f, locL) } catch (e: Exception) {}
         try { sm.getDefaultSensor(Sensor.TYPE_HEART_RATE)?.let { sm.registerListener(hrL, it, SensorManager.SENSOR_DELAY_NORMAL) } } catch (e: Exception) {}
@@ -171,6 +196,7 @@ class Ui(val c: Context) {
 
     fun stop() {
         tracking = false
+        s.sp.edit().putBoolean("appTracking", false).apply()
         try { lm.removeUpdates(locL) } catch (e: Exception) {}
         sm.unregisterListener(hrL)
         speed = -1f
@@ -191,8 +217,9 @@ class Ui(val c: Context) {
     fun weekRuns(): List<Run> = runs.filter { it.t >= weekStart(System.currentTimeMillis()) }
     fun shown(): Shown? =
         if (tracking) Shown(runTitle(System.currentTimeMillis()), dist, secs, bpm, pts)
+        else if (bgTrk) Shown(runTitle(System.currentTimeMillis(), bgKind), bgDist, bgSecs, -1, emptyList())
         else runs.getOrNull(if (selected in runs.indices) selected else 0)?.let {
-            Shown(runTitle(it.t), it.dist, it.secs, it.bpm, it.pts)
+            Shown(runTitle(it.t, it.kind), it.dist, it.secs, it.bpm, it.pts)
         }
 }
 
@@ -312,7 +339,8 @@ fun HincApp(ctx: Context) {
     val thud: () -> Unit = { haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
     val view = LocalView.current
     SideEffect { view.keepScreenOn = ui.tracking }
-    DisposableEffect(Unit) { ui.startSensors(); onDispose { ui.stopSensors() } }
+    DisposableEffect(Unit) { ui.startSensors(); ui.attach(); onDispose { ui.stopSensors(); ui.detach() } }
+    LaunchedEffect(Unit) { if (ui.bgOn) MotionService.start(ctx) }
     LaunchedEffect(ui.tracking) { while (ui.tracking) { delay(1000); ui.secs = ui.secs + 1 } }
     BackHandler(face || tab != 0 || dlg.isNotEmpty()) { if (face) face = false else if (dlg.isNotEmpty()) dlg = "" else tab = 0 }
 
@@ -323,9 +351,30 @@ fun HincApp(ctx: Context) {
         if (res[fine] == true) { ui.start(); thud(); tab = 0 }
     }
     val notifLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    fun has(p: String) = ContextCompat.checkSelfPermission(act, p) == PackageManager.PERMISSION_GRANTED
+    val bgLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { res ->
+        val locOk = has(Manifest.permission.ACCESS_FINE_LOCATION)
+        val arOk = Build.VERSION.SDK_INT < 29 || has(Manifest.permission.ACTIVITY_RECOGNITION)
+        if (locOk && arOk) ui.setBg(true)
+        else android.widget.Toast.makeText(act, "Location and activity permissions are needed", android.widget.Toast.LENGTH_LONG).show()
+    }
+    val onBg: (Boolean) -> Unit = { on ->
+        if (!on) ui.setBg(false)
+        else {
+            val need = ArrayList<String>()
+            if (!has(Manifest.permission.ACCESS_FINE_LOCATION)) { need.add(Manifest.permission.ACCESS_FINE_LOCATION); need.add(Manifest.permission.ACCESS_COARSE_LOCATION) }
+            if (Build.VERSION.SDK_INT >= 29 && !has(Manifest.permission.ACTIVITY_RECOGNITION)) need.add(Manifest.permission.ACTIVITY_RECOGNITION)
+            if (Build.VERSION.SDK_INT >= 33 && !has(Manifest.permission.POST_NOTIFICATIONS)) need.add(Manifest.permission.POST_NOTIFICATIONS)
+            if (need.isEmpty()) ui.setBg(true) else bgLauncher.launch(need.toTypedArray())
+        }
+    }
+    val onBattery: () -> Unit = {
+        try { act.startActivity(android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (e: Exception) {}
+    }
     val onRecord: () -> Unit = {
         thud()
         if (ui.tracking) ui.stop()
+        else if (ui.bgTrk) MotionService.stopRun(ctx)
         else if (ContextCompat.checkSelfPermission(act, fine) == PackageManager.PERMISSION_GRANTED) { ui.start(); tab = 0 }
         else permLauncher.launch(perms)
     }
@@ -354,7 +403,7 @@ fun HincApp(ctx: Context) {
                 "remind" -> RemindDialog(ui, ctx, thud, onNeedNotif = {
                     if (Build.VERSION.SDK_INT >= 33) notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 }) { dlg = "" }
-                "settings" -> SettingsDialog(ui, thud) { dlg = "" }
+                "settings" -> SettingsDialog(ui, thud, onBg, onBattery) { dlg = "" }
             }
         }
     }

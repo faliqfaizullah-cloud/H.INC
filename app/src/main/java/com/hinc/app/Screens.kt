@@ -159,6 +159,7 @@ fun RunCard(th: Theme, sh: Shown?, ui: Ui, m: Modifier) {
             }
         }
         val hint = when {
+            ui.bgTrk && !ui.tracking -> "Tracking in the background…"
             ui.tracking && pts.size < 2 -> "Searching for GPS…"
             sh == null -> "Tap the dashed circle to start your first run"
             else -> ""
@@ -187,7 +188,9 @@ fun HomeScreen(ui: Ui, tick: () -> Unit, onPlan: () -> Unit, onBell: () -> Unit,
     val hDp = LocalConfiguration.current.screenHeightDp
     val sh = ui.shown()
     val wk = ui.weekRuns()
-    val label = when { ui.level < 0.1f -> "Idle"; ui.level < 0.55f -> "Walking"; else -> "Running" }
+    val own = when { ui.level < 0.1f -> "Idle"; ui.level < 0.55f -> "Walking"; else -> "Running" }
+    val label = if (ui.bgTrk && !ui.tracking) "Auto · Tracking"
+        else if (ui.bgOn && !ui.tracking) "Auto · " + listOf("Idle", "Walking", "Running")[ui.bgAct.coerceIn(0, 2)] else own
     val planned = (0..6).filter { (ui.plan and (1 shl it)) != 0 }
     val letters = listOf("M", "T", "W", "T", "F", "S", "S")
     val todayIdx = dayIndex(System.currentTimeMillis())
@@ -237,7 +240,7 @@ fun RunRow(ui: Ui, r: Run, onOpen: () -> Unit, onDelete: () -> Unit) {
     Row(Modifier.fillMaxWidth().clip(sh).background(Color.White.copy(.32f)).border(1.dp, GlassB, sh).clickable { onOpen() }.padding(16.dp),
         Arrangement.SpaceBetween, Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            T(runTitle(r.t), 16.sp, InkL, FontWeight.Normal)
+            T(runTitle(r.t, r.kind), 16.sp, InkL, FontWeight.Normal)
             T(ROWFMT.format(Date(r.t)), 12.sp, InkL.copy(.7f))
         }
         Column(horizontalAlignment = Alignment.End) {
@@ -431,7 +434,7 @@ fun RemindDialog(ui: Ui, ctx: Context, thud: () -> Unit, onNeedNotif: () -> Unit
 }
 
 @Composable
-fun SettingsDialog(ui: Ui, thud: () -> Unit, onClose: () -> Unit) {
+fun SettingsDialog(ui: Ui, thud: () -> Unit, onBg: (Boolean) -> Unit, onBattery: () -> Unit, onClose: () -> Unit) {
     var confirm by remember { mutableStateOf(false) }
     DialogCard("Settings", onClose) {
         T("Units", 12.sp, Color(0xFF777777))
@@ -439,6 +442,13 @@ fun SettingsDialog(ui: Ui, thud: () -> Unit, onClose: () -> Unit) {
             Chip("Kilometres", ui.unit == 0, Modifier.weight(1f)) { ui.unit = 0; ui.savePrefs() }
             Chip("Miles", ui.unit == 1, Modifier.weight(1f)) { ui.unit = 1; ui.savePrefs() }
         }
+        T("Background detection", 12.sp, Color(0xFF777777))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip("On", ui.bgOn, Modifier.weight(1f)) { onBg(true) }
+            Chip("Off", !ui.bgOn, Modifier.weight(1f)) { onBg(false) }
+        }
+        T("Keeps running in the background, notices walking or running and records the route automatically. A notification stays visible while it runs.", 12.sp, Color(0xFF777777))
+        Btn("Battery settings", false, Modifier.fillMaxWidth()) { onBattery() }
         T("Colour: tap the yellow button on the home screen to switch card colours.", 12.sp, Color(0xFF777777))
         Btn(if (confirm) "Tap again to delete all runs" else "Clear history", false, Modifier.fillMaxWidth()) {
             if (confirm) { ui.clearRuns(); thud(); confirm = false; onClose() } else confirm = true
