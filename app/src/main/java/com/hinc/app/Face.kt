@@ -159,7 +159,7 @@ class FaceCam(val c: Context) {
         s.saveScans(scans)
     }
 
-    fun setTemp(v: Float) { temp = v; s.tempC = v }
+    fun saveTemp(v: Float) { temp = v; s.tempC = v }
     fun setLen(v: Int) { scanLen = v; s.scanLen = v }
     fun clearScans() { scans = emptyList(); s.saveScans(scans); progress = 0f }
 
@@ -518,7 +518,7 @@ fun FaceScreen(ctx: Context, tick: () -> Unit, thud: () -> Unit, onBack: () -> U
                         DChip("Cancel", false, Modifier.weight(1f)) { dlg = "" }
                         DChip("Save", true, Modifier.weight(1f)) {
                             val v = txt.toFloatOrNull()
-                            if (v != null && v in 30f..45f) { cam.setTemp(v); thud(); dlg = "" }
+                            if (v != null && v in 30f..45f) { cam.saveTemp(v); thud(); dlg = "" }
                         }
                     }
                 }
