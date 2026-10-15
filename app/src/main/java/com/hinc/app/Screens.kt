@@ -182,7 +182,7 @@ fun RunCard(th: Theme, sh: Shown?, ui: Ui, m: Modifier) {
 }
 
 @Composable
-fun HomeScreen(ui: Ui, tick: () -> Unit, onPlan: () -> Unit, onBell: () -> Unit, onGear: () -> Unit) {
+fun HomeScreen(ui: Ui, tick: () -> Unit, onPlan: () -> Unit, onBell: () -> Unit, onGear: () -> Unit, onFace: () -> Unit) {
     val th = THEMES[ui.theme % THEMES.size]
     val hDp = LocalConfiguration.current.screenHeightDp
     val sh = ui.shown()
@@ -201,6 +201,8 @@ fun HomeScreen(ui: Ui, tick: () -> Unit, onPlan: () -> Unit, onBell: () -> Unit,
             Spacer(Modifier.weight(1f))
             T(label, 12.sp, Color.White.copy(.9f))
             Spacer(Modifier.weight(1f))
+            GlassCircle(46.dp, onClick = { tick(); onFace() }) { Ico("face", Color.White, 22.dp) }
+            Spacer(Modifier.width(10.dp))
             GlassCircle(46.dp, onClick = { tick(); onBell() }) { Ico("bell", Color.White, 22.dp) }
             Spacer(Modifier.width(10.dp))
             GlassCircle(46.dp, onClick = { tick(); onGear() }) { Ico("gear", Color.White, 22.dp) }

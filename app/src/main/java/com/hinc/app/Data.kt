@@ -10,6 +10,7 @@ import java.util.Calendar
 import java.util.Locale
 
 data class Pt(val lat: Double, val lon: Double)
+data class Scan(val t: Long, val hr: Int, val rmssd: Int)
 data class Run(val t: Long, val dist: Float, val secs: Int, val bpm: Int, val pts: List<Pt>)
 
 class Store(ctx: Context) {
@@ -35,6 +36,22 @@ class Store(ctx: Context) {
     var remM: Int
         get() = sp.getInt("remM", 0)
         set(x) { sp.edit().putInt("remM", x).apply() }
+
+    var tempC: Float
+        get() = sp.getFloat("tempC", 0f)
+        set(x) { sp.edit().putFloat("tempC", x).apply() }
+    var scanLen: Int
+        get() = sp.getInt("scanLen", 30)
+        set(x) { sp.edit().putInt("scanLen", x).apply() }
+    fun scans(): List<Scan> = runCatching {
+        val a = JSONArray(sp.getString("scans", "[]"))
+        (0 until a.length()).map { val o = a.getJSONObject(it); Scan(o.getLong("t"), o.getInt("h"), o.getInt("r")) }
+    }.getOrDefault(emptyList())
+    fun saveScans(l: List<Scan>) {
+        val a = JSONArray()
+        l.forEach { a.put(JSONObject().put("t", it.t).put("h", it.hr).put("r", it.rmssd)) }
+        sp.edit().putString("scans", a.toString()).apply()
+    }
 
     fun runs(): List<Run> = runCatching {
         val a = JSONArray(sp.getString("runs", "[]"))

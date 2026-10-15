@@ -264,6 +264,15 @@ fun Ico(kind: String, color: Color, sz: Dp = 24.dp) {
                 val a = i * Math.PI.toFloat() / 2f
                 drawCircle(color, w * .2f, center + Offset(kotlin.math.cos(a), kotlin.math.sin(a)) * (w * .2f))
             }
+            "face" -> {
+                val l = w * .14f; val m = w * .32f
+                for (sx in listOf(1f, -1f)) for (sy in listOf(1f, -1f)) {
+                    val cx = if (sx > 0) l else w - l; val cy = if (sy > 0) l else w - l
+                    val pth = Path().apply { moveTo(cx, cy + sy * m * .6f); lineTo(cx, cy); lineTo(cx + sx * m * .6f, cy) }
+                    drawPath(pth, color, style = st)
+                }
+                drawOval(color, Offset(w * .33f, w * .28f), Size(w * .34f, w * .44f), style = st)
+            }
             "check" -> {
                 val p = Path().apply { moveTo(w * .22f, w * .52f); lineTo(w * .42f, w * .72f); lineTo(w * .78f, w * .3f) }
                 drawPath(p, color, style = Stroke(w * .12f, cap = StrokeCap.Round, join = StrokeJoin.Round))
@@ -297,6 +306,7 @@ fun HincApp(ctx: Context) {
     val act = LocalContext.current
     var tab by remember { mutableStateOf(0) }
     var dlg by remember { mutableStateOf("") }
+    var face by remember { mutableStateOf(false) }
     val haptic = LocalHapticFeedback.current
     val tick: () -> Unit = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
     val thud: () -> Unit = { haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
@@ -304,7 +314,7 @@ fun HincApp(ctx: Context) {
     SideEffect { view.keepScreenOn = ui.tracking }
     DisposableEffect(Unit) { ui.startSensors(); onDispose { ui.stopSensors() } }
     LaunchedEffect(ui.tracking) { while (ui.tracking) { delay(1000); ui.secs = ui.secs + 1 } }
-    BackHandler(tab != 0 || dlg.isNotEmpty()) { if (dlg.isNotEmpty()) dlg = "" else tab = 0 }
+    BackHandler(face || tab != 0 || dlg.isNotEmpty()) { if (face) face = false else if (dlg.isNotEmpty()) dlg = "" else tab = 0 }
 
     val fine = Manifest.permission.ACCESS_FINE_LOCATION
     val perms = if (ui.hasHr) arrayOf(fine, Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.BODY_SENSORS)
@@ -330,7 +340,7 @@ fun HincApp(ctx: Context) {
             }
             Box(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 16.dp)) {
                 when (tab) {
-                    0 -> HomeScreen(ui, tick, onPlan = { dlg = "plan" }, onBell = { dlg = "remind" }, onGear = { dlg = "settings" })
+                    0 -> HomeScreen(ui, tick, onPlan = { dlg = "plan" }, onBell = { dlg = "remind" }, onGear = { dlg = "settings" }, onFace = { face = true })
                     1 -> HistoryScreen(ui, tick) { tab = 0 }
                     3 -> CalendarScreen(ui, tick) { tab = 0 }
                     else -> StatsScreen(ui)
@@ -338,6 +348,7 @@ fun HincApp(ctx: Context) {
                 NavBar(Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp), tab, ui.tracking,
                     onTab = { tick(); tab = it }, onRecord = onRecord)
             }
+            if (face) FaceScreen(ctx, tick, thud) { face = false }
             when (dlg) {
                 "plan" -> PlanDialog(ui, thud) { dlg = "" }
                 "remind" -> RemindDialog(ui, ctx, thud, onNeedNotif = {
